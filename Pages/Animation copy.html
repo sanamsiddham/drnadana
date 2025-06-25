@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>p5.js Slime Mold Simulation</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.js"></script>
+    <style>
+        /* Basic styling */
+        html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            background-color: #111; /* Dark background for the page */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: sans-serif;
+            color: #ccc;
+        }
+        canvas {
+            display: block;
+            border: 1px solid #333; /* Optional border */
+        }
+         #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 0.8em;
+            color: #aaa;
+            background-color: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 3px;
+         }
+    </style>
+</head>
+<body>
+     <div id="info">Slime Mold Simulation (Physarum polycephalum inspired)</div>
+    <script>
+        // --- Simulation Parameters ---
+        const NUM_AGENTS = 3000; // Number of agents (particles)
+        const AGENT_SPEED = 1; // How fast agents move
+        const SENSOR_ANGLE_OFFSET = Math.PI / 5; // Angle of side sensors relative to forward (36 degrees)
+        const SENSOR_DISTANCE = 9; // How far ahead sensors detect
+        const TURN_SPEED = Math.PI / 10; // How sharply agents turn (radians)
+        const RANDOM_STEER_STRENGTH = Math.PI / 60; // How much randomness in movement
+        const DEPOSIT_AMOUNT = 7; // How much trail is deposited (0-255)
+        const DECAY_FACTOR = 0.98; // How quickly trails fade (0.9 to 0.99 recommended)
+        const BLUR_RADIUS = 1; // How much trails diffuse (pixels)
+        const AGENT_COLOR = [255, 255, 0, 200]; // Agent color (RGBA)
+        const TRAIL_COLOR = [200, 255, 180, 255]; // Trail map base color influence (RGBA) - agents deposit white on top
+
+        let agents = [];
+        let trailMap; // p5.Graphics object for the trail map (offscreen buffer)
+
+        // --- Agent Class ---
+        class Agent {
+            constructor(x, y) {
+                this.pos = createVector(x || random(width), y || random(height)); // Position
+                this.angle = random(TWO_PI); // Initial random direction
+                this.speed = AGENT_SPEED;
+            }
+
+            // Sense the trail map at a given angle offset relative to current direction
+            sense(angleOffset) {
+                let sensorAngle = this.angle + angleOffset;
+                let sensorX = this.pos.x + cos(sensorAngle) * SENSOR_DISTANCE;
+                let sensorY = this.pos.y + sin(sensorAngle) * SENSOR_DISTANCE;
+
+                // Wrap sensor position around edges
+                sensorX = (sensorX + width) % width;
+                sensorY = (sensorY + height) % height;
+
+                // Get color from trailMap at sensor location
+                // trailMap.get() is simpler but slower for many agents.
+                // Reading directly from pixels array would be faster but more complex.
+                let sample = trailMap.get(int(sensorX), int(sensorY));
+
+                // Return brightness (or alpha) as the trail strength indicator
+                // Using alpha channel (index 3) if trails are drawn with transparency,
+                // or brightness of the color. Let's use brightness for simplicity here.
+                return brightness(sample);
+            }
+
+            // Decide which way to turn based on sensor readings
+            steer() {
+                let senseF = this.sense(0); // Sensor Forward
+                let senseL = this.sense(-SENSOR_ANGLE_OFFSET); // Sensor Left
+                let senseR = this.sense(SENSOR_ANGLE_OFFSET); // Sensor Right
+
+                // Add randomness
+                let randomSteer = random(-RANDOM_STEER_STRENGTH, RANDOM_STEER_STRENGTH);
+
+                // If Forward is strongest, potentially keep going (with randomness)
+                if (senseF > senseL && senseF > senseR) {
+                    this.angle += randomSteer;
+                }
+                // If Left is stronger than Right
+                else if (senseL > senseR) {
+                    this.angle -= TURN_SPEED; // Turn left
+                    this.angle += randomSteer * 0.5; // Less random when turning strongly
+                }
+                // If Right is stronger than Left (or equal)
+                else if (senseR > senseL) {
+                    this.angle += TURN_SPEED; // Turn right
+                    this.angle += randomSteer * 0.5; // Less random when turning strongly
+                }
+                 // If L and R are equal but stronger than F, choose randomly
+                 else if (senseL === senseR && senseL > senseF){
+                     this.angle += random(-TURN_SPEED, TURN_SPEED) * 0.5 + randomSteer;
+                 }
+                 else { // If sensors are equal or unclear, add randomness
+                     this.angle += randomSteer * 2; // More random if no clear path
+                 }
+
+                 // Keep angle within 0 to TWO_PI range (optional, helps debugging)
+                 // this.angle = (this.angle + TWO_PI) % TWO_PI;
+            }
+
+            // Move the agent
+            move() {
+                let velocityX = cos(this.angle) * this.speed;
+                let velocityY = sin(this.angle) * this.speed;
+                this.pos.x += velocityX;
+                this.pos.y += velocityY;
+
+                // Wrap around edges
+                this.wrapEdges();
+            }
+
+            // Deposit trail onto the trailMap
+            deposit() {
+                // Check if position is valid before drawing
+                 if (this.pos.x >= 0 && this.pos.x < width && this.pos.y >= 0 && this.pos.y < height) {
+                    trailMap.strokeWeight(1);
+                    trailMap.stroke(255, 255, 255, DEPOSIT_AMOUNT); // Deposit white with some alpha
+                    trailMap.point(this.pos.x, this.pos.y);
+                 }
+            }
+
+            // Wrap agent position around screen edges
+            wrapEdges() {
+                if (this.pos.x < 0) this.pos.x = width - 1;
+                if (this.pos.x >= width) this.pos.x = 0;
+                if (this.pos.y < 0) this.pos.y = height - 1;
+                if (this.pos.y >= height) this.pos.y = 0;
+            }
+
+            // Draw the agent itself on the main canvas
+            display() {
+                // Use fill for slightly larger, more visible agents
+                fill(AGENT_COLOR[0], AGENT_COLOR[1], AGENT_COLOR[2], AGENT_COLOR[3]);
+                noStroke();
+                ellipse(this.pos.x, this.pos.y, 2, 2); // Draw agent as a small ellipse
+
+                // Or use points for performance with very high agent counts
+                // stroke(AGENT_COLOR[0], AGENT_COLOR[1], AGENT_COLOR[2], AGENT_COLOR[3]);
+                // strokeWeight(2);
+                // point(this.pos.x, this.pos.y);
+            }
+
+             update() {
+                 this.steer();
+                 this.move();
+                 this.deposit(); // Deposit onto the trail map
+                 this.display(); // Draw agent on main canvas
+             }
+        } // End Agent Class
+
+        // --- p5.js Functions ---
+
+        function setup() {
+            let canvas = createCanvas(windowWidth * 0.8, windowHeight * 0.8); // Adjust size as needed
+             canvas.parent(document.body); // Ensure canvas is attached correctly
+
+            // Create the offscreen graphics buffer for the trail map
+            trailMap = createGraphics(width, height);
+            trailMap.background(0); // Start with a black trail map
+            trailMap.pixelDensity(1); // Ensure graphics buffer matches canvas density
+
+            // Initialize agents
+            for (let i = 0; i < NUM_AGENTS; i++) {
+                // Start agents near the center for a classic slime mold spread
+                 let startRadius = min(width, height) * 0.1;
+                 let angle = random(TWO_PI);
+                 let radius = random(startRadius);
+                 let startX = width / 2 + cos(angle) * radius;
+                 let startY = height / 2 + sin(angle) * radius;
+                 agents.push(new Agent(startX, startY));
+
+                // Or start randomly across the screen
+                // agents.push(new Agent());
+            }
+             // Initial agent styling
+            //noStroke(); // Set default for agents if using fill
+        }
+
+        function draw() {
+             // 1. Update & Display Trail Map
+             // Apply decay (draw transparent black rectangle over trail map)
+             trailMap.noStroke();
+             trailMap.fill(0, 0, 0, (1 - DECAY_FACTOR) * 255); // Alpha based on decay factor
+             trailMap.rect(0, 0, width, height);
+
+            // Apply diffusion (blur) - Can be performance intensive
+            if (BLUR_RADIUS > 0) {
+                trailMap.filter(BLUR, BLUR_RADIUS);
+            }
+
+            // Optional: Add a base color tint to the trail map for visual style
+            // trailMap.blendMode(ADD); // Experiment with blend modes
+            // trailMap.tint(TRAIL_COLOR[0], TRAIL_COLOR[1], TRAIL_COLOR[2], 5); // Apply a faint tint
+            // trailMap.image(trailMap,0,0); // Apply tint by drawing itself onto itself? Careful here.
+            // trailMap.blendMode(BLEND); // Reset blend mode
+
+
+             // 2. Update Agents (Sense, Move, Deposit) & Draw Agents
+             background(17, 17, 17); // Clear main canvas slightly darker than black
+             image(trailMap, 0, 0); // Draw the trail map onto the main canvas
+
+             for (let agent of agents) {
+                 agent.update(); // Handles steer, move, deposit, and display
+             }
+
+             // Optional: Display Frame Rate
+             // fill(255);
+             // textSize(10);
+             // text(`FPS: ${frameRate().toFixed(1)}`, 10, height - 10);
+        }
+
+        function windowResized() {
+            // Very basic resize handling - might need more robust logic for ongoing simulations
+            resizeCanvas(windowWidth * 0.8, windowHeight * 0.8);
+            // Recreate trailMap and potentially restart simulation or scale existing trails
+            trailMap = createGraphics(width, height);
+            trailMap.background(0);
+            trailMap.pixelDensity(1);
+
+            // Re-initialize agents (simplest approach)
+            agents = [];
+             for (let i = 0; i < NUM_AGENTS; i++) {
+                 let startRadius = min(width, height) * 0.1;
+                 let angle = random(TWO_PI);
+                 let radius = random(startRadius);
+                 let startX = width / 2 + cos(angle) * radius;
+                 let startY = height / 2 + sin(angle) * radius;
+                 agents.push(new Agent(startX, startY));
+             }
+        }
+
+    </script>
+</body>
+</html>
